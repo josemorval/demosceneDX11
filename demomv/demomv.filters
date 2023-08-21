@@ -20,7 +20,7 @@
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="xdata.h">
+    <ClInclude Include="meshdata.h">
       <Filter>Archivos de origen</Filter>
     </ClInclude>
   </ItemGroup>

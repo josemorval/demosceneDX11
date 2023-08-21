@@ -1,0 +1,65 @@
+#define TEXTURE_WIDTH  2
+#define TEXTURE_HEIGHT 2
+UINT TextureData[] =
+{
+    0xffffffff, 0xff7f7f7f,
+    0xff7f7f7f, 0xffffffff,
+};
+
+
+D3D11_TEXTURE2D_DESC textureDesc = {};
+textureDesc.Width = TEXTURE_WIDTH;  // in xdata.h
+textureDesc.Height = TEXTURE_HEIGHT; // in xdata.h
+textureDesc.MipLevels = 1;
+textureDesc.ArraySize = 1;
+textureDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+textureDesc.SampleDesc.Count = 1;
+textureDesc.Usage = D3D11_USAGE_IMMUTABLE;
+textureDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+D3D11_SUBRESOURCE_DATA textureData = {};
+textureData.pSysMem = TextureData;
+textureData.SysMemPitch = TEXTURE_WIDTH * sizeof(UINT); // 4 bytes per pixel
+ID3D11Texture2D* texture;
+device->CreateTexture2D(&textureDesc, &textureData, &texture);
+ID3D11ShaderResourceView* textureView;
+device->CreateShaderResourceView(texture, nullptr, &textureView);
+
+struct Constants
+{
+    matrix Transform;
+    matrix Projection;
+    float3 LightVector;
+};
+
+D3D11_BUFFER_DESC constantBufferDesc = {};
+constantBufferDesc.ByteWidth = sizeof(Constants) + 0xf & 0xfffffff0; // round constant buffer size to 16 byte boundary
+constantBufferDesc.Usage = D3D11_USAGE_DYNAMIC;
+constantBufferDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+constantBufferDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+ID3D11Buffer* constantBuffer;
+device->CreateBuffer(&constantBufferDesc, nullptr, &constantBuffer);
+
+D3D11_MAPPED_SUBRESOURCE mappedSubresource;
+deviceContext->Map(constantBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mappedSubresource);
+
+Constants* constants = reinterpret_cast<Constants*>(mappedSubresource.pData);
+
+constants->Transform = rotateX * rotateY * rotateZ * scale * translate;
+constants->Projection = { 2 * n / w, 0, 0, 0, 0, 2 * n / h, 0, 0, 0, 0, f / (f - n), 1, 0, 0, n * f / (n - f), 0 };
+constants->LightVector = { 1.0f, -1.0f, 1.0f };
+
+deviceContext->Unmap(constantBuffer, 0);
+
+cbuffer constants : register(b0)
+{
+    row_major float4x4 transform;
+    row_major float4x4 projection;
+    float3   lightvector;
+}
+
+Texture2D    mytexture : register(t0);
+SamplerState mysampler : register(s0);
+
+
+
+p + u*right + v*up + w*forward

@@ -1,0 +1,6 @@
+x64/
+demomv/x64
+*.exe
+*.pdb
+.vs/
+*backup
