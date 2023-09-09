@@ -1,23 +1,24 @@
 cbuffer constants : register(b0) 
 {
-    row_major float4x4 transform;
     row_major float4x4 projection;
     float time;
+    float3 camerapos;
+    float3 cameradir;
 };
 
 struct vs_in
 {
-    float3 position : POS;
-    float3 normal   : NOR;
-    float2 texcoord : TEX;
-    uint   instance   : SV_InstanceID;
+    float3 position :   POS;
+    float3 normal   :   NOR;
+    float2 texcoord :   TEX;
+    uint   instance :   SV_InstanceID;
 };
 
 struct vs_out
 {
-    float4 position : SV_POSITION;
-    float3 normal :   NOR;
-    float2 texcoord : TEX;
+    float4 position :   SV_POSITION;
+    float3 normal   :   NOR;
+    float2 texcoord :   TEX;
 };
 
 #define BLOCK_SIZE 8
@@ -32,7 +33,7 @@ float3 view_pos(float3 t, float3 pos)
     float3 up = float3(0.0, 1.0, 0.0);
     float3 forward = -normalize(ro);
     float3 right = normalize(cross(forward, up));
-    up = normalize(cross(forward, right));
+    up = normalize(cross(right,forward));
 
     worldpos -= ro;
     float3 p;

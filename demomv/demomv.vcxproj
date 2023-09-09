@@ -132,6 +132,11 @@
       <PreprocessorDefinitions>NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <WholeProgramOptimization>false</WholeProgramOptimization>
+      <AdditionalOptions>/Gs /Oa /Og</AdditionalOptions>
+      <CallingConvention>FastCall</CallingConvention>
+      <ExceptionHandling>false</ExceptionHandling>
+      <FavorSizeOrSpeed>Size</FavorSizeOrSpeed>
+      <AssemblerOutput>AssemblyAndSourceCode</AssemblerOutput>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>

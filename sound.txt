@@ -1,0 +1,41 @@
+#pragma comment(lib, "dsound")
+
+#include <dsound.h>
+
+#define MZK_DURATION    200
+#define MZK_RATE        44100
+#define MZK_NUMCHANNELS 2
+
+#define MZK_NUMSAMPLES  (MZK_DURATION*MZK_RATE)
+#define MZK_NUMSAMPLESC (MZK_NUMSAMPLES*MZK_NUMCHANNELS)
+
+void mzk_init(short* buffer)
+{
+    for (int i = 0; i < MZK_NUMSAMPLES; i++)
+    {
+        const float fl = i * (((i >> 12) | (i >> 8)) & (63 & (i >> 4)));
+        const float fr = i * (((i >> 12) | (i >> 8)) & (63 & (i >> 4)));
+        buffer[2 * i + 0] = fl;
+        buffer[2 * i + 1] = fr;
+    }
+}
+
+static WAVEFORMATEX format = { WAVE_FORMAT_PCM, MZK_NUMCHANNELS, MZK_RATE, MZK_RATE * MZK_NUMCHANNELS * sizeof(short), MZK_NUMCHANNELS * sizeof(short), 8 * sizeof(short) };
+static DSBUFFERDESC bufferDesc1 = { sizeof(DSBUFFERDESC), DSBCAPS_PRIMARYBUFFER };
+static DSBUFFERDESC bufferDesc2 = { sizeof(DSBUFFERDESC), DSBCAPS_GETCURRENTPOSITION2 | DSBCAPS_GLOBALFOCUS, MZK_NUMSAMPLESC * sizeof(short), NULL, &format, NULL };
+
+
+short* myMuzik;
+unsigned long        length;
+LPDIRECTSOUNDBUFFER  m_pSecondary;
+LPDIRECTSOUND        m_pDS;
+LPDIRECTSOUNDBUFFER  m_pPrimary;
+DirectSoundCreate(0, &m_pDS, 0);
+m_pDS->SetCooperativeLevel(window, DSSCL_PRIORITY);
+m_pDS->CreateSoundBuffer(&bufferDesc1, &m_pPrimary, NULL);
+m_pDS->CreateSoundBuffer(&bufferDesc2, &m_pSecondary, NULL);
+m_pPrimary->SetFormat(&format);
+m_pSecondary->Lock(0, MZK_NUMSAMPLESC * sizeof(short), (void**)&myMuzik, &length, NULL, NULL, NULL);
+mzk_init(myMuzik);
+m_pSecondary->Unlock(myMuzik, length, NULL, NULL);
+m_pSecondary->Play(0, 0, 0);

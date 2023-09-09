@@ -4,3 +4,4 @@ demomv/x64
 *.pdb
 .vs/
 *backup
+demomv/Release
