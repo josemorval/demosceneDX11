@@ -39,7 +39,8 @@ float4 normalize4( float4 a) { float l = len4(a); return { a.x / l, a.y / l, a.z
 float3 cross( float3 a, float3 b) { return { a.y * b.z - a.z * b.y, -a.x * b.z + a.z * b.x, a.x * b.y - a.y * b.x }; }
 
 // 3d graphics helper functions library
-float4x4 computeProjectionMatrix(float fov, float aspectRatio, float znear, float zfar) {
+float4x4 computeProjectionMatrix(float fov, float aspectRatio, float znear, float zfar) 
+{
     float4x4 projectionMatrix;
 
     float h = 1 / tanf(fov * 0.5);
@@ -68,6 +69,36 @@ float4x4 computeProjectionMatrix(float fov, float aspectRatio, float znear, floa
     projectionMatrix.m[3][3] = 0.0f;
 
     return projectionMatrix;
+}
+float4x4 computeOrthographicMatrix(float width, float height, float znear, float zfar) {
+    float4x4 orthographicMatrix;
+
+    float left = -width / 2.0f;
+    float right = width / 2.0f;
+    float bottom = -height / 2.0f;
+    float top = height / 2.0f;
+
+    orthographicMatrix.m[0][0] = 2.0f / width;
+    orthographicMatrix.m[0][1] = 0.0f;
+    orthographicMatrix.m[0][2] = 0.0f;
+    orthographicMatrix.m[0][3] = 0.0f;
+
+    orthographicMatrix.m[1][0] = 0.0f;
+    orthographicMatrix.m[1][1] = 2.0f / height;
+    orthographicMatrix.m[1][2] = 0.0f;
+    orthographicMatrix.m[1][3] = 0.0f;
+
+    orthographicMatrix.m[2][0] = 0.0f;
+    orthographicMatrix.m[2][1] = 0.0f;
+    orthographicMatrix.m[2][2] = 1.0f / (zfar - znear);
+    orthographicMatrix.m[2][3] = 0.0f;
+
+    orthographicMatrix.m[3][0] = 0.0f;
+    orthographicMatrix.m[3][1] = 0.0f;
+    orthographicMatrix.m[3][2] = -znear / (zfar - znear);
+    orthographicMatrix.m[3][3] = 1.0f;
+
+    return orthographicMatrix;
 }
 float4x4 computeViewMatrix(float3 positionCamera, float3 viewPoint) {
 
@@ -99,36 +130,6 @@ float3 getForwardVectorViewMatrix(float4x4 viewMatrix)
 
 }
 
-void collectTimestamps(ID3D11DeviceContext* pContext)
-{
-/*
-    // Wait for data to be available
-    while (pContext->GetData(pQueryDisjoint, NULL, 0, 0) == S_FALSE)
-    {
-        Sleep(1);       // Wait a bit, but give other threads a chance to run
-    }
-
-    // Check whether timestamps were disjoint during the last frame
-    D3D10_QUERY_DATA_TIMESTAMP_DISJOINT tsDisjoint;
-    pContext->GetData(pQueryDisjoint, &tsDisjoint, sizeof(tsDisjoint), 0);
-    if (tsDisjoint.Disjoint)
-    {
-        return;
-    }
-
-    // Get all the timestamps
-    UINT64 tsBeginFrame, tsShadowClear, // ... etc.
-        pContext->GetData(pQueryBeginFrame, &tsBeginFrame, sizeof(UINT64), 0);
-    pContext->GetData(pQueryShadowClear, &tsShadowClear, sizeof(UINT64), 0);
-    // ... etc.
-
-    // Convert to real time
-    float msShadowClear = float(tsShadowClear - tsBeginFrame) /
-        float(tsDisjoint.Frequency) * 1000.0f;
-    // ... etc.
- */
-}
-
 struct GlobalShaderConstants
 {
     float4x4 ProjMat;
@@ -144,7 +145,7 @@ float3 cameraRight;
 float3 cameraUp;
 float2 mousePos;
 bool mouseClicked;
-
+float gpuTime;
 
 //  GPU resources
 ID3D11Device1* device;
@@ -153,8 +154,6 @@ ID3D11Texture2D* frameBuffer;
 ID3D11RenderTargetView* frameBufferView;
 ID3D11Texture2D* depthBuffer;
 ID3D11DepthStencilView* depthBufferView;
-ID3D11ShaderResourceView* depthSRV;
-
 
 ID3DBlob* vsBlob;
 ID3D11VertexShader* vertexShader;
@@ -167,6 +166,10 @@ ID3D11Buffer* constantBuffer;
 
 ID3D11ShaderResourceView* pViewnullptr = nullptr;
 ID3D11UnorderedAccessView* pUnorderedViewnullptr = nullptr;
+
+ID3D11Query* pQueryDisjoint;
+ID3D11Query* pQueryBeginFrame;
+ID3D11Query* pQueryEndFrame;
 
 
 void CompileAllShaders()
@@ -228,7 +231,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     {
         swapChainDesc.Width = 0;
         swapChainDesc.Height = 0;
-        swapChainDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+        swapChainDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
         swapChainDesc.Stereo = FALSE;
         swapChainDesc.SampleDesc.Count = 1;
         swapChainDesc.SampleDesc.Quality = 0;
@@ -318,7 +321,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     viewport.MinDepth = 0.0f;
     viewport.MaxDepth = 1.0f;
 
-
     //Global time
     float worldTime = 0.0f;
 
@@ -333,6 +335,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     // Setup Dear ImGui style
     ImGui::StyleColorsDark();
+    ImGui::GetIO().FontGlobalScale = 1.5f;
 
     ImGui_ImplDX11_Init(device, deviceContext);
     ImGui_ImplWin32_Init(window);
@@ -343,9 +346,47 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     cameraRight = { 0.0f,0.0f,0.0f };
     cameraUp = { 0.0f,0.0f,0.0f };
     mouseClicked = false;
+    gpuTime = 0.0f;
+
+    ID3D11Texture2D* copyDepthTexture;
+    ID3D11ShaderResourceView* copyDepthSRV;
+
+    D3D11_TEXTURE2D_DESC copyDepthDesc = {};
+    copyDepthDesc.Width = depthBufferDesc.Width;
+    copyDepthDesc.Height = depthBufferDesc.Height;
+    copyDepthDesc.MipLevels = 1;
+    copyDepthDesc.ArraySize = 1;
+    copyDepthDesc.Format = DXGI_FORMAT_R24G8_TYPELESS; // Use the format of your depth buffer
+    copyDepthDesc.SampleDesc.Count = 1;
+    copyDepthDesc.Usage = D3D11_USAGE_DEFAULT;
+    copyDepthDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+
+    device->CreateTexture2D(&copyDepthDesc, nullptr, &copyDepthTexture);
+
+    D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+    srvDesc.Format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS; // Use the format of your depth buffer
+    srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    srvDesc.Texture2D.MipLevels = 1;
+
+    device->CreateShaderResourceView(copyDepthTexture, &srvDesc, &copyDepthSRV);
+
+
+    //Time querys
+    D3D11_QUERY_DESC query_disjoint_description = {};
+    query_disjoint_description.Query = D3D11_QUERY_TIMESTAMP_DISJOINT;
+    device->CreateQuery(&query_disjoint_description, &pQueryDisjoint);
+    D3D11_QUERY_DESC query_timestamp_description = {};
+    query_timestamp_description.Query = D3D11_QUERY_TIMESTAMP;
+    device->CreateQuery(&query_timestamp_description, &pQueryBeginFrame);
+    device->CreateQuery(&query_timestamp_description, &pQueryEndFrame);
+
 
     while (true)
     {
+
+        deviceContext->Begin(pQueryDisjoint);
+        deviceContext->End(pQueryBeginFrame);
+
         //Here some imgui logic
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
@@ -358,9 +399,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             ImGui::Text("Camera Right: (%.2f, %.2f, %.2f)", cameraRight.x, cameraRight.y, cameraRight.z);
             ImGui::Text("Camera Up: (%.2f, %.2f, %.2f)", cameraUp.x, cameraUp.y, cameraUp.z);
             ImGui::Text("Camera Forward: (%.2f, %.2f, %.2f)", cameraDir.x, cameraDir.y, cameraDir.z);
+            ImGui::Text("GPU Time: %.2f ms", gpuTime);
+
         ImGui::End();
-        ImGui::Begin("Debug");
-        ImGui::Image(depthSRV, ImVec2(depthBufferDesc.Width, depthBufferDesc.Height));
+
+        ImGui::Begin("Depth Buffer", NULL, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoScrollbar);
+        ImVec2 windowSize = ImVec2(0.3f*depthBufferDesc.Width, 0.3f*depthBufferDesc.Height);
+        ImGui::SetWindowSize(windowSize);
+        ImGui::Image((ImTextureID)copyDepthSRV, windowSize);
         ImGui::End();
         
         //End of imgui logic
@@ -372,6 +418,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         constants->WorldTime = worldTime;
         constants->ViewMat = computeViewMatrix(cameraPos, cameraPos + cameraDir);
         constants->ProjMat = computeProjectionMatrix(0.5, 1.0f * viewport.Width / viewport.Height, 1.0f, 10.0f);
+        //constants->ProjMat = computeOrthographicMatrix(20.0f * viewport.Width / viewport.Height, 20.0f , 1.0f, 100.0f);
         cameraRight = getRightVectorViewMatrix(constants->ViewMat);
         cameraUp = getUpVectorViewMatrix(constants->ViewMat);
 
@@ -473,6 +520,28 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
 
         swapChain->Present(1, 0);
+
+        deviceContext->End(pQueryEndFrame);
+        deviceContext->End(pQueryDisjoint);
+
+
+        //Compute GPU timing
+        UINT64 StartTime = 0;
+        while (deviceContext->GetData(pQueryBeginFrame, &StartTime, sizeof(StartTime), 0) != S_OK);
+        UINT64 EndTime = 0;
+        while (deviceContext->GetData(pQueryEndFrame, &EndTime, sizeof(EndTime), 0) != S_OK);
+        D3D11_QUERY_DATA_TIMESTAMP_DISJOINT DisjointData;
+        while (deviceContext->GetData(pQueryDisjoint, &DisjointData, sizeof(DisjointData), 0) != S_OK);
+        float Time = 0.0f;
+        if (!DisjointData.Disjoint)
+        {
+            UINT64 Delta = EndTime - StartTime;
+            float Frequency = static_cast<float>(DisjointData.Frequency);
+            gpuTime = (Delta / Frequency) * 1000.0f;
+        }
+
+        deviceContext->CopyResource(copyDepthTexture, depthBuffer);
+
 
     }
 }
