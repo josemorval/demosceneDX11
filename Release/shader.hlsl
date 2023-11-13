@@ -30,9 +30,7 @@ VS_OUT vs_main(VS_IN input)
 
     output.position = float4(input.position, 1.0);
     output.position.y += sin(0.5 * output.position.x + time) * sin(0.7 * output.position.z + 1.1*time);
-    output.position = mul(view_matrix, output.position);
-    output.position = mul(projection_matrix, output.position);
-
+    output.position = mul(projection_matrix,mul(view_matrix, output.position));
     output.texcoord = input.texcoord;
     output.normal = input.normal;
 
@@ -41,9 +39,5 @@ VS_OUT vs_main(VS_IN input)
 
 float4 ps_main(VS_OUT input) : SV_TARGET
 {
-    float q = 3.0f*input.position.z/input.position.w;
-    float3 col = 0.5 * input.normal + 0.5;
-    col *= q;
-
-    return float4(col,1.0);
+    return float4(0.5 * input.normal + 0.5,1.0);
 }
