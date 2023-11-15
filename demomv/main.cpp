@@ -130,13 +130,6 @@ float3 getForwardVectorViewMatrix(float4x4 viewMatrix)
 
 }
 
-struct GlobalShaderConstants
-{
-    float4x4 ProjMat;
-    float4x4 ViewMat;
-    float WorldTime;
-};
-
 //  CPU resources
 
 float3 cameraPos;
@@ -144,21 +137,33 @@ float3 cameraDir;
 float3 cameraRight;
 float3 cameraUp;
 float2 mousePos;
+float3 lightDir;
+float3 lightColor;
 bool mouseClicked;
-float gpuTime;
+
 
 //  GPU resources
 ID3D11Device1* device;
+ID3D11DeviceContext1* deviceContext;
+IDXGIAdapter* dxgiAdapter;
 
 ID3D11Texture2D* frameBuffer;
 ID3D11RenderTargetView* frameBufferView;
 ID3D11Texture2D* depthBuffer;
 ID3D11DepthStencilView* depthBufferView;
+ID3D11ShaderResourceView* depthBufferSRV;
+ID3D11Texture2D* shadowMapBuffer;
+ID3D11DepthStencilView* shadowMapView;
+ID3D11ShaderResourceView* shadowMapSRV;
 
 ID3DBlob* vsBlob;
-ID3D11VertexShader* vertexShader;
 ID3DBlob* psBlob;
+
+ID3D11VertexShader* vertexShader;
 ID3D11PixelShader* pixelShader;
+
+ID3D11VertexShader* shadowMapVertexShader;
+ID3D11PixelShader* shadowMapPixelShader;
 
 ID3D11Buffer* vertexBuffer;
 ID3D11Buffer* indexBuffer;
@@ -167,17 +172,127 @@ ID3D11Buffer* constantBuffer;
 ID3D11ShaderResourceView* pViewnullptr = nullptr;
 ID3D11UnorderedAccessView* pUnorderedViewnullptr = nullptr;
 
-ID3D11Query* pQueryDisjoint;
-ID3D11Query* pQueryBeginFrame;
-ID3D11Query* pQueryEndFrame;
+struct GlobalShaderConstants
+{
+    float4x4 ProjMat;
+    float4x4 ViewMat;
+    float4x4 LightProjMat;
+    float4x4 LightViewMat;
+    float WorldTime;
+};
+struct GPUProfiling
+{
+    ID3D11Query* gpuQueryDisjoint;
+    ID3D11Query* gpuQueryPoints[20];
+    char gpuQueryPointNames[20][256];
+    float gpuQueryTimes[20];
 
+    int numQueryPoints;
+
+    GPUProfiling()
+    {
+        numQueryPoints = 0;
+        D3D11_QUERY_DESC queryDesc;
+        queryDesc.MiscFlags = 0;
+        queryDesc.Query = D3D11_QUERY_TIMESTAMP_DISJOINT;
+        device->CreateQuery(&queryDesc, &gpuQueryDisjoint);
+
+        queryDesc.MiscFlags = 0;
+        queryDesc.Query = D3D11_QUERY_TIMESTAMP;
+        for (int i = 0; i < 20; i++)
+        {
+            device->CreateQuery(&queryDesc, &gpuQueryPoints[i]);
+            gpuQueryTimes[i] = 0.0f;
+        }
+    }
+
+    void beginProfiling()
+    {
+        numQueryPoints = 0;
+        deviceContext->Begin(gpuQueryDisjoint);
+    }
+
+    void addPoint(const char* name)
+    {
+        deviceContext->End(gpuQueryPoints[numQueryPoints]);
+        strcpy_s(gpuQueryPointNames[numQueryPoints], name);
+        numQueryPoints++;
+    }
+
+    void endProfiling()
+    {
+        deviceContext->End(gpuQueryPoints[numQueryPoints]);
+        strcpy_s(gpuQueryPointNames[numQueryPoints], "End");
+        deviceContext->End(gpuQueryDisjoint);
+        numQueryPoints++;
+    }
+
+    void computeTimes()
+    {
+        UINT64 utimes[20];
+
+        for (int i = 0; i < numQueryPoints; i++)
+        {
+            while (deviceContext->GetData(gpuQueryPoints[i], &utimes[i], sizeof(utimes[i]), 0) != S_OK);
+        }
+
+        D3D11_QUERY_DATA_TIMESTAMP_DISJOINT disjointdata;
+        while (deviceContext->GetData(gpuQueryDisjoint, &disjointdata, sizeof(disjointdata), 0) != S_OK);
+        if (!disjointdata.Disjoint)
+        {
+            for (int i = 0; i < numQueryPoints - 1; i++) {
+                UINT64 Delta = utimes[i + 1] - utimes[i];
+                float Frequency = (float)disjointdata.Frequency;
+
+                if (gpuQueryTimes[i] == 0.0f)
+                {
+                    gpuQueryTimes[i] = (Delta / Frequency) * 1000.0f;
+                }
+                else
+                {
+                    gpuQueryTimes[i] = 0.01f * (Delta / Frequency) * 1000.0f + 0.99f * gpuQueryTimes[i];
+                }
+            }
+        }
+    }
+
+    void imguiTimes()
+    {
+        ImGui::Columns(2, "myColumns");
+        ImGui::SetColumnWidth(0, 300.0f);
+        ImGui::SetColumnWidth(1, 50.0f);
+
+        for (int i = 0; i < numQueryPoints - 1; i++)
+        {
+            char buffer[64];
+
+            ImGui::Text(gpuQueryPointNames[i]);
+
+            ImGui::NextColumn();
+            ImGui::Text(" %.2f ms", gpuQueryTimes[i]);
+
+            ImGui::NextColumn();
+        }
+
+        ImGui::Columns(1);
+    }
+
+
+};
 
 void CompileAllShaders()
 {
+
     D3DCompileFromFile(L"shader.hlsl", nullptr, nullptr, "vs_main", "vs_5_0", 0, 0, &vsBlob, nullptr);
     device->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &vertexShader);
     D3DCompileFromFile(L"shader.hlsl", nullptr, nullptr, "ps_main", "ps_5_0", 0, 0, &psBlob, nullptr);
     device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &pixelShader);
+
+    //Shadow maps shaders
+    D3DCompileFromFile(L"shader.hlsl", nullptr, nullptr, "vs_main_light", "vs_5_0", 0, 0, &vsBlob, nullptr);
+    device->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &shadowMapVertexShader);
+    D3DCompileFromFile(L"shader.hlsl", nullptr, nullptr, "ps_main_light", "ps_5_0", 0, 0, &psBlob, nullptr);
+    device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &shadowMapPixelShader);
 }
 void CreateAllVertexIndexBuffers()
 {
@@ -217,18 +332,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT, featureLevels, ARRAYSIZE(featureLevels), D3D11_SDK_VERSION, &baseDevice, nullptr, &baseDeviceContext);
 
     baseDevice->QueryInterface(__uuidof(ID3D11Device1), (void**)&device);
-    ID3D11DeviceContext1* deviceContext;
     baseDeviceContext->QueryInterface(__uuidof(ID3D11DeviceContext1), (void**)&deviceContext);
 
     IDXGIDevice1* dxgiDevice;
     device->QueryInterface(__uuidof(IDXGIDevice1), (void**)&dxgiDevice);
-    IDXGIAdapter* dxgiAdapter;
     dxgiDevice->GetAdapter(&dxgiAdapter);
     IDXGIFactory2* dxgiFactory;
     dxgiAdapter->GetParent(__uuidof(IDXGIFactory2), (void**)&dxgiFactory);
 
-    DXGI_SWAP_CHAIN_DESC1 swapChainDesc;
-    {
+    DXGI_SWAP_CHAIN_DESC1 swapChainDesc; {
         swapChainDesc.Width = 0;
         swapChainDesc.Height = 0;
         swapChainDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
@@ -249,22 +361,53 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     device->CreateRenderTargetView(frameBuffer, nullptr, &frameBufferView);
 
     D3D11_TEXTURE2D_DESC depthBufferDesc;
-    frameBuffer->GetDesc(&depthBufferDesc);
-    {
+    frameBuffer->GetDesc(&depthBufferDesc);{
         depthBufferDesc.MipLevels = 1;
         depthBufferDesc.ArraySize = 1;
-        depthBufferDesc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+        depthBufferDesc.Format = DXGI_FORMAT_R24G8_TYPELESS;
         depthBufferDesc.SampleDesc.Count = 1;
         depthBufferDesc.SampleDesc.Quality = 0;
         depthBufferDesc.Usage = D3D11_USAGE_DEFAULT;
-        depthBufferDesc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+        depthBufferDesc.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
         depthBufferDesc.CPUAccessFlags = 0;
         depthBufferDesc.MiscFlags = 0;
 
     }
-
     device->CreateTexture2D(&depthBufferDesc, nullptr, &depthBuffer);
-    device->CreateDepthStencilView(depthBuffer, nullptr, &depthBufferView);
+
+    D3D11_DEPTH_STENCIL_VIEW_DESC depthBufferDSVDesc = {};
+    depthBufferDSVDesc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+    depthBufferDSVDesc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+    device->CreateDepthStencilView(depthBuffer, &depthBufferDSVDesc, &depthBufferView);
+
+    D3D11_SHADER_RESOURCE_VIEW_DESC depthBufferSRVdesc = {};
+    depthBufferSRVdesc.Format = DXGI_FORMAT_R24G8_TYPELESS;
+    depthBufferSRVdesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    depthBufferSRVdesc.Texture2D.MipLevels = 1;
+    device->CreateShaderResourceView(depthBuffer, &depthBufferSRVdesc, &depthBufferSRV);
+
+    D3D11_TEXTURE2D_DESC shadowmapDepthDesc = {};
+    shadowmapDepthDesc.Width = depthBufferDesc.Width;
+    shadowmapDepthDesc.Height = depthBufferDesc.Height;
+    shadowmapDepthDesc.MipLevels = 1;
+    shadowmapDepthDesc.ArraySize = 1;
+    shadowmapDepthDesc.Format = DXGI_FORMAT_R32_TYPELESS;
+    shadowmapDepthDesc.SampleDesc.Count = 1;
+    shadowmapDepthDesc.Usage = D3D11_USAGE_DEFAULT;
+    shadowmapDepthDesc.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
+
+    device->CreateTexture2D(&shadowmapDepthDesc, nullptr, &shadowMapBuffer);
+
+    D3D11_DEPTH_STENCIL_VIEW_DESC shadowmapDSVdesc = {};
+    shadowmapDSVdesc.Format = DXGI_FORMAT_D32_FLOAT;
+    shadowmapDSVdesc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+    device->CreateDepthStencilView(shadowMapBuffer, &shadowmapDSVdesc,  &shadowMapView);
+
+    D3D11_SHADER_RESOURCE_VIEW_DESC shadowmapSRVdesc = {};
+    shadowmapSRVdesc.Format = DXGI_FORMAT_R32_FLOAT;
+    shadowmapSRVdesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    shadowmapSRVdesc.Texture2D.MipLevels = 1;
+    device->CreateShaderResourceView(shadowMapBuffer, &shadowmapSRVdesc, &shadowMapSRV);
 
     CompileAllShaders();
 
@@ -333,92 +476,117 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO(); (void)io;
 
-    // Setup Dear ImGui style
     ImGui::StyleColorsDark();
-    ImGui::GetIO().FontGlobalScale = 1.5f;
+    ImGui::GetIO().FontGlobalScale = 1.15f;
 
     ImGui_ImplDX11_Init(device, deviceContext);
     ImGui_ImplWin32_Init(window);
-
     
-    cameraPos = { 0.0f,2.0f,-30.0f };
-    cameraDir = { 0.0f, 0.0f, 1.0f };
+    cameraPos = { 6.0f,9.0f, 6.0f };
+    cameraDir = { -0.5f, -0.5f, -0.5f };
     cameraRight = { 0.0f,0.0f,0.0f };
     cameraUp = { 0.0f,0.0f,0.0f };
+    lightDir = { -0.5f, -0.5f, -0.5f };
+    lightColor = { 1.0f, 1.0f, 1.0f };
     mouseClicked = false;
-    gpuTime = 0.0f;
-
-    ID3D11Texture2D* copyDepthTexture;
-    ID3D11ShaderResourceView* copyDepthSRV;
-
-    D3D11_TEXTURE2D_DESC copyDepthDesc = {};
-    copyDepthDesc.Width = depthBufferDesc.Width;
-    copyDepthDesc.Height = depthBufferDesc.Height;
-    copyDepthDesc.MipLevels = 1;
-    copyDepthDesc.ArraySize = 1;
-    copyDepthDesc.Format = DXGI_FORMAT_R24G8_TYPELESS; // Use the format of your depth buffer
-    copyDepthDesc.SampleDesc.Count = 1;
-    copyDepthDesc.Usage = D3D11_USAGE_DEFAULT;
-    copyDepthDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-
-    device->CreateTexture2D(&copyDepthDesc, nullptr, &copyDepthTexture);
-
-    D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-    srvDesc.Format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS; // Use the format of your depth buffer
-    srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-    srvDesc.Texture2D.MipLevels = 1;
-
-    device->CreateShaderResourceView(copyDepthTexture, &srvDesc, &copyDepthSRV);
-
 
     //Time querys
-    D3D11_QUERY_DESC query_disjoint_description = {};
-    query_disjoint_description.Query = D3D11_QUERY_TIMESTAMP_DISJOINT;
-    device->CreateQuery(&query_disjoint_description, &pQueryDisjoint);
-    D3D11_QUERY_DESC query_timestamp_description = {};
-    query_timestamp_description.Query = D3D11_QUERY_TIMESTAMP;
-    device->CreateQuery(&query_timestamp_description, &pQueryBeginFrame);
-    device->CreateQuery(&query_timestamp_description, &pQueryEndFrame);
-
+    GPUProfiling gpuProfiling;
 
     while (true)
     {
+        //Main ImGui logic
+        {
+            ImGui_ImplDX11_NewFrame();
+            ImGui_ImplWin32_NewFrame();
+            ImGui::NewFrame();
 
-        deviceContext->Begin(pQueryDisjoint);
-        deviceContext->End(pQueryBeginFrame);
+            ImGui::SetNextWindowSize(ImVec2(300, 150), ImGuiCond_FirstUseEver);
+            ImGui::GetStyle().Colors[ImGuiCol_WindowBg] = ImVec4(0.f, 0.0f, 0.0f, 1.0f);
+            ImGui::Begin("Inspector");
 
-        //Here some imgui logic
-        ImGui_ImplDX11_NewFrame();
-        ImGui_ImplWin32_NewFrame();
-        ImGui::NewFrame();
+            if (ImGui::CollapsingHeader("Camera info", ImGuiTreeNodeFlags_DefaultOpen))
+            {
+                ImGui::Columns(2, "CameraInfoColumns", false);
+                ImGui::SetColumnWidth(0, 150.0f);
+                ImGui::SetColumnWidth(1, 200.0f);
+                ImGui::Text("Camera Position");
+                ImGui::NextColumn();
+                ImGui::Text("%.2f, %.2f, %.2f", cameraPos.x, cameraPos.y, cameraPos.z);
+                ImGui::NextColumn();
+                ImGui::Text("Camera Right");
+                ImGui::NextColumn();
+                ImGui::Text("%.2f, %.2f, %.2f", cameraRight.x, cameraRight.y, cameraRight.z);
+                ImGui::NextColumn();
+                ImGui::Text("Camera Up");
+                ImGui::NextColumn();
+                ImGui::Text("%.2f, %.2f, %.2f", cameraUp.x, cameraUp.y, cameraUp.z);
+                ImGui::NextColumn();
+                ImGui::Text("Camera Forward");
+                ImGui::NextColumn();
+                ImGui::Text("%.2f, %.2f, %.2f", cameraDir.x, cameraDir.y, cameraDir.z);
+                ImGui::NextColumn();
+                ImGui::Columns(1);
 
-        ImGui::SetNextWindowSize(ImVec2(300, 150),ImGuiCond_FirstUseEver);
-        ImGui::GetStyle().Colors[ImGuiCol_WindowBg] = ImVec4(0.f, 0.0f, 0.0f, 1.0f);
-        ImGui::Begin("Inspector");
-            ImGui::Text("Camera Position: (%.2f, %.2f, %.2f)", cameraPos.x, cameraPos.y, cameraPos.z);
-            ImGui::Text("Camera Right: (%.2f, %.2f, %.2f)", cameraRight.x, cameraRight.y, cameraRight.z);
-            ImGui::Text("Camera Up: (%.2f, %.2f, %.2f)", cameraUp.x, cameraUp.y, cameraUp.z);
-            ImGui::Text("Camera Forward: (%.2f, %.2f, %.2f)", cameraDir.x, cameraDir.y, cameraDir.z);
-            ImGui::Text("GPU Time: %.2f ms", gpuTime);
+                ImGui::NewLine();
 
-        ImGui::End();
+                static int cameraSelectedType = 1;
+                const char* cameraTypes[] = { "Orthographic", "Perspective" };
 
-        ImGui::Begin("Depth Buffer", NULL, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoScrollbar);
-        ImVec2 windowSize = ImVec2(0.3f*depthBufferDesc.Width, 0.3f*depthBufferDesc.Height);
-        ImGui::SetWindowSize(windowSize);
-        ImGui::Image((ImTextureID)copyDepthSRV, windowSize);
-        ImGui::End();
-        
-        //End of imgui logic
-        ImGui::Render();
+                static float cameraortho_width = 20.0f;
+                static float cameraortho_height = 20.0f;
+                static float cameraortho_near = 1.0f;
+                static float cameraortho_far = 100.0f;
+                static float camerapers_fov = 0.5;
+                static float camerapers_near = 1.0f;
+                static float camerapers_far = 10.0f;
 
-        worldTime += 0.016f;
+                ImGui::Combo("", &cameraSelectedType, cameraTypes, IM_ARRAYSIZE(cameraTypes));
+
+                if (cameraSelectedType == 0)
+                {
+                    ImGui::DragFloat("Width", &cameraortho_width, 0.01f);
+                    ImGui::DragFloat("Height", &cameraortho_height, 0.01f);
+                    ImGui::DragFloat("Near", &cameraortho_near, 0.01f);
+                    ImGui::DragFloat("Far", &cameraortho_far, 0.01f);
+
+                    constants->ProjMat = computeOrthographicMatrix(cameraortho_width * viewport.Width / viewport.Height, cameraortho_height, cameraortho_near, cameraortho_far);
+                }
+                if (cameraSelectedType == 1)
+                {
+                    ImGui::DragFloat("FOV", &camerapers_fov, 0.01f);
+                    ImGui::DragFloat("Near", &camerapers_near, 0.01f);
+                    ImGui::DragFloat("Far", &camerapers_far, 0.01f);
+
+                    constants->ProjMat = computeProjectionMatrix(camerapers_fov, viewport.Width / viewport.Height, camerapers_near, camerapers_far);
+                }
+
+            }
+
+            ImGui::NewLine();
+
+            if (ImGui::CollapsingHeader("GPU Profiling", ImGuiTreeNodeFlags_DefaultOpen))
+            {
+                gpuProfiling.imguiTimes();
+            }
+            ImGui::End();
+
+            ImGui::Begin("Light camera", NULL, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoScrollbar);
+            ImVec2 windowSize = ImVec2(0.3f * shadowmapDepthDesc.Width, 0.3f * shadowmapDepthDesc.Height);
+            ImGui::SetWindowSize(windowSize);
+            ImGui::Image((ImTextureID)shadowMapSRV, windowSize);
+            ImGui::End();
+
+            ImGui::Render();
+        }
 
         //Update shader constants buffer
+        worldTime += 0.016f;
         constants->WorldTime = worldTime;
         constants->ViewMat = computeViewMatrix(cameraPos, cameraPos + cameraDir);
-        constants->ProjMat = computeProjectionMatrix(0.5, 1.0f * viewport.Width / viewport.Height, 1.0f, 10.0f);
-        //constants->ProjMat = computeOrthographicMatrix(20.0f * viewport.Width / viewport.Height, 20.0f , 1.0f, 100.0f);
+        constants->LightViewMat = computeViewMatrix(-20.0f * lightDir, float3{ 0.0f,0.0f,0.0f });
+        constants->LightProjMat = computeOrthographicMatrix(20.0f * viewport.Width / viewport.Height, 20.0f, 1.0f, 25.0f);
+
         cameraRight = getRightVectorViewMatrix(constants->ViewMat);
         cameraUp = getUpVectorViewMatrix(constants->ViewMat);
 
@@ -497,51 +665,55 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             DispatchMessageA(&msg);
         }
 
+        gpuProfiling.beginProfiling();
+
+        gpuProfiling.addPoint("Clear render targets");
+        deviceContext->ClearDepthStencilView(shadowMapView, D3D11_CLEAR_DEPTH, 1.0f, 0);
         deviceContext->ClearRenderTargetView(frameBufferView, backgroundColor);
         deviceContext->ClearDepthStencilView(depthBufferView, D3D11_CLEAR_DEPTH, 1.0f, 0);
+
+        gpuProfiling.addPoint("Shadow map render");
+        deviceContext->OMSetRenderTargets(0, nullptr, shadowMapView);
+
         deviceContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         deviceContext->IASetInputLayout(inputLayout);
         deviceContext->IASetVertexBuffers(0, 1, &vertexBuffer, &stride, &offset);
         deviceContext->IASetIndexBuffer(indexBuffer, DXGI_FORMAT_R32_UINT, 0);
 
         deviceContext->VSSetShaderResources(0, 1, &pViewnullptr);
-        deviceContext->VSSetShader(vertexShader, nullptr, 0);
+        deviceContext->VSSetShader(shadowMapVertexShader, nullptr, 0);
         deviceContext->VSSetConstantBuffers(0, 1, &constantBuffer);
+
+        deviceContext->PSSetShader(shadowMapPixelShader, nullptr, 0);
 
         deviceContext->RSSetViewports(1, &viewport);
         deviceContext->RSSetState(rasterizerState);
 
-        deviceContext->PSSetShader(pixelShader, nullptr, 0);
-        deviceContext->PSSetSamplers(0, 1, &samplerState);
+        deviceContext->DrawIndexed(ARRAYSIZE(IndexData), 0, 0);
+
+        gpuProfiling.addPoint("Normal render");
 
         deviceContext->OMSetRenderTargets(1, &frameBufferView, depthBufferView);
+        deviceContext->VSSetShaderResources(0, 1, &pViewnullptr);
+        deviceContext->VSSetShader(vertexShader, nullptr, 0);
+        deviceContext->VSSetConstantBuffers(0, 1, &constantBuffer);
+
+        deviceContext->PSSetShaderResources(0, 1, &pViewnullptr);
+        deviceContext->PSSetShaderResources(0, 1, &shadowMapSRV);
+        deviceContext->PSSetShader(pixelShader, nullptr, 0);
+        deviceContext->PSSetSamplers(0, 1, &samplerState);
+        deviceContext->PSSetConstantBuffers(0, 1, &constantBuffer);
+
         deviceContext->DrawIndexed(ARRAYSIZE(IndexData), 0, 0);
-        
+
+        gpuProfiling.addPoint("Render imgui");
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
 
+        gpuProfiling.addPoint("Present instruction");
         swapChain->Present(1, 0);
 
-        deviceContext->End(pQueryEndFrame);
-        deviceContext->End(pQueryDisjoint);
-
-
-        //Compute GPU timing
-        UINT64 StartTime = 0;
-        while (deviceContext->GetData(pQueryBeginFrame, &StartTime, sizeof(StartTime), 0) != S_OK);
-        UINT64 EndTime = 0;
-        while (deviceContext->GetData(pQueryEndFrame, &EndTime, sizeof(EndTime), 0) != S_OK);
-        D3D11_QUERY_DATA_TIMESTAMP_DISJOINT DisjointData;
-        while (deviceContext->GetData(pQueryDisjoint, &DisjointData, sizeof(DisjointData), 0) != S_OK);
-        float Time = 0.0f;
-        if (!DisjointData.Disjoint)
-        {
-            UINT64 Delta = EndTime - StartTime;
-            float Frequency = static_cast<float>(DisjointData.Frequency);
-            gpuTime = (Delta / Frequency) * 1000.0f;
-        }
-
-        deviceContext->CopyResource(copyDepthTexture, depthBuffer);
-
+        gpuProfiling.endProfiling();
+        gpuProfiling.computeTimes();
 
     }
 }
