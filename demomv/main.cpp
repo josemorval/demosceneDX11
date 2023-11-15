@@ -139,7 +139,10 @@ float3 cameraUp;
 float2 mousePos;
 float3 lightDir;
 float3 lightColor;
+float lightAngle1;
+float lightAngle2;
 bool mouseClicked;
+bool shadowsActive;
 
 
 //  GPU resources
@@ -258,9 +261,9 @@ struct GPUProfiling
 
     void imguiTimes()
     {
-        ImGui::Columns(2, "myColumns");
-        ImGui::SetColumnWidth(0, 300.0f);
-        ImGui::SetColumnWidth(1, 50.0f);
+        ImGui::Columns(2, "gpuprofiling_times");
+        ImGui::SetColumnWidth(0, 200);
+        ImGui::SetColumnWidth(1, 100.0f);
 
         for (int i = 0; i < numQueryPoints - 1; i++)
         {
@@ -279,7 +282,6 @@ struct GPUProfiling
 
 
 };
-
 void CompileAllShaders()
 {
 
@@ -364,11 +366,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     frameBuffer->GetDesc(&depthBufferDesc);{
         depthBufferDesc.MipLevels = 1;
         depthBufferDesc.ArraySize = 1;
-        depthBufferDesc.Format = DXGI_FORMAT_R24G8_TYPELESS;
+        depthBufferDesc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
         depthBufferDesc.SampleDesc.Count = 1;
         depthBufferDesc.SampleDesc.Quality = 0;
         depthBufferDesc.Usage = D3D11_USAGE_DEFAULT;
-        depthBufferDesc.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
+        depthBufferDesc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
         depthBufferDesc.CPUAccessFlags = 0;
         depthBufferDesc.MiscFlags = 0;
 
@@ -414,9 +416,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     ID3D11InputLayout* inputLayout;
     D3D11_INPUT_ELEMENT_DESC inputElementDesc[] = // float3 position, float3 normal, float2 texcoord, float3 color
     {
-        { "POS", 0,           DXGI_FORMAT_R32G32B32_FLOAT,    0,                            0,   D3D11_INPUT_PER_VERTEX_DATA,   0 },
-        { "NOR", 0,           DXGI_FORMAT_R32G32B32_FLOAT,    0, D3D11_APPEND_ALIGNED_ELEMENT,   D3D11_INPUT_PER_VERTEX_DATA,   0 },
-        { "TEX", 0,           DXGI_FORMAT_R32G32_FLOAT,       0, D3D11_APPEND_ALIGNED_ELEMENT,   D3D11_INPUT_PER_VERTEX_DATA,   0 },
+        { "POSITION", 0,           DXGI_FORMAT_R32G32B32_FLOAT,    0,                            0,   D3D11_INPUT_PER_VERTEX_DATA,   0 },
+        { "NORMAL", 0,           DXGI_FORMAT_R32G32B32_FLOAT,    0, D3D11_APPEND_ALIGNED_ELEMENT,   D3D11_INPUT_PER_VERTEX_DATA,   0 },
+        { "TEXCOORD", 0,           DXGI_FORMAT_R32G32_FLOAT,       0, D3D11_APPEND_ALIGNED_ELEMENT,   D3D11_INPUT_PER_VERTEX_DATA,   0 },
         { "SV_InstanceID", 0, DXGI_FORMAT_R32_UINT,           0, D3D11_APPEND_ALIGNED_ELEMENT,   D3D11_INPUT_PER_VERTEX_DATA,   0 },
     };
     device->CreateInputLayout(inputElementDesc, ARRAYSIZE(inputElementDesc), vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), &inputLayout);
@@ -472,9 +474,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     GlobalShaderConstants* constants = (GlobalShaderConstants*) mappedSubresource.pData;
     deviceContext->Unmap(constantBuffer, 0);
 
-    //Imgui initialization stuff
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO(); (void)io;
+    io.Fonts->AddFontFromFileTTF("misc/fonts/DroidSans.ttf", 16.0f);
 
     ImGui::StyleColorsDark();
     ImGui::GetIO().FontGlobalScale = 1.15f;
@@ -482,13 +484,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     ImGui_ImplDX11_Init(device, deviceContext);
     ImGui_ImplWin32_Init(window);
     
-    cameraPos = { 6.0f,9.0f, 6.0f };
+    cameraPos = { 17.0f,20.0f, 17.0f };
     cameraDir = { -0.5f, -0.5f, -0.5f };
     cameraRight = { 0.0f,0.0f,0.0f };
     cameraUp = { 0.0f,0.0f,0.0f };
     lightDir = { -0.5f, -0.5f, -0.5f };
     lightColor = { 1.0f, 1.0f, 1.0f };
+    lightAngle1 = 0.2f;
+    lightAngle2 = 0.6f;
     mouseClicked = false;
+    shadowsActive = true;
 
     //Time querys
     GPUProfiling gpuProfiling;
@@ -507,28 +512,28 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
             if (ImGui::CollapsingHeader("Camera info", ImGuiTreeNodeFlags_DefaultOpen))
             {
-                ImGui::Columns(2, "CameraInfoColumns", false);
-                ImGui::SetColumnWidth(0, 150.0f);
+                ImGui::Columns(2, "camera_info");
+                ImGui::SetColumnWidth(0, 200.0f);
                 ImGui::SetColumnWidth(1, 200.0f);
-                ImGui::Text("Camera Position");
+                ImGui::Text("Position");
                 ImGui::NextColumn();
                 ImGui::Text("%.2f, %.2f, %.2f", cameraPos.x, cameraPos.y, cameraPos.z);
                 ImGui::NextColumn();
-                ImGui::Text("Camera Right");
+                ImGui::Text("Transform Right");
                 ImGui::NextColumn();
                 ImGui::Text("%.2f, %.2f, %.2f", cameraRight.x, cameraRight.y, cameraRight.z);
                 ImGui::NextColumn();
-                ImGui::Text("Camera Up");
+                ImGui::Text("Transform Up");
                 ImGui::NextColumn();
                 ImGui::Text("%.2f, %.2f, %.2f", cameraUp.x, cameraUp.y, cameraUp.z);
                 ImGui::NextColumn();
-                ImGui::Text("Camera Forward");
+                ImGui::Text("Transform Forward");
                 ImGui::NextColumn();
                 ImGui::Text("%.2f, %.2f, %.2f", cameraDir.x, cameraDir.y, cameraDir.z);
                 ImGui::NextColumn();
                 ImGui::Columns(1);
 
-                ImGui::NewLine();
+                ImGui::ColorEdit3("Background color", backgroundColor);
 
                 static int cameraSelectedType = 1;
                 const char* cameraTypes[] = { "Orthographic", "Perspective" };
@@ -562,6 +567,20 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                 }
 
             }
+            if (ImGui::CollapsingHeader("Light info", ImGuiTreeNodeFlags_DefaultOpen))
+            {
+                ImGui::Columns(2, "light_info");
+                ImGui::SetColumnWidth(0, 200.0f);
+                ImGui::SetColumnWidth(1, 200.0f);
+                ImGui::Text("Light direction");
+                ImGui::NextColumn();
+                ImGui::Text("%.2f, %.2f, %.2f", lightDir.x, lightDir.y, lightDir.z);
+                ImGui::Columns(1);
+                ImGui::DragFloat("Azimuthal angle", &lightAngle1, 0.01f);
+                ImGui::DragFloat("Zenithal angle", &lightAngle2, 0.01f);
+                ImGui::Checkbox("Shadows enabled", &shadowsActive);
+
+            }
 
             ImGui::NewLine();
 
@@ -582,10 +601,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
         //Update shader constants buffer
         worldTime += 0.016f;
+        lightDir = { -cosf(lightAngle1) * cosf(lightAngle2),-sinf(lightAngle2),-sinf(lightAngle1)*cosf(lightAngle2) };
         constants->WorldTime = worldTime;
         constants->ViewMat = computeViewMatrix(cameraPos, cameraPos + cameraDir);
         constants->LightViewMat = computeViewMatrix(-20.0f * lightDir, float3{ 0.0f,0.0f,0.0f });
-        constants->LightProjMat = computeOrthographicMatrix(20.0f * viewport.Width / viewport.Height, 20.0f, 1.0f, 25.0f);
+        constants->LightProjMat = computeOrthographicMatrix(15.0f * viewport.Width / viewport.Height, 15.0f, 1.0f, 25.0f);
 
         cameraRight = getRightVectorViewMatrix(constants->ViewMat);
         cameraUp = getUpVectorViewMatrix(constants->ViewMat);
@@ -689,7 +709,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         deviceContext->RSSetViewports(1, &viewport);
         deviceContext->RSSetState(rasterizerState);
 
-        deviceContext->DrawIndexed(ARRAYSIZE(IndexData), 0, 0);
+        if (shadowsActive)
+        {
+            deviceContext->DrawIndexed(ARRAYSIZE(IndexData), 0, 0);
+        }
 
         gpuProfiling.addPoint("Normal render");
 
@@ -706,13 +729,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
         deviceContext->DrawIndexed(ARRAYSIZE(IndexData), 0, 0);
 
-        gpuProfiling.addPoint("Render imgui");
+        gpuProfiling.endProfiling();
+
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
 
-        gpuProfiling.addPoint("Present instruction");
         swapChain->Present(1, 0);
 
-        gpuProfiling.endProfiling();
         gpuProfiling.computeTimes();
 
     }
