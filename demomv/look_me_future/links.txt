@@ -1,1 +1,0 @@
-https://www.reedbeta.com/blog/gpu-profiling-101/ gpuprofiler.zip

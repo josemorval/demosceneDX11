@@ -11,6 +11,9 @@
 #include "imgui_impl_win32.h"
 #include "imgui_impl_dx11.h"
 
+#include <fstream>
+#include <vector>
+
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 #define TITLE "demosandbox"
@@ -132,6 +135,7 @@ float3 getForwardVectorViewMatrix(float4x4 viewMatrix)
 
 //  CPU resources
 
+float worldTime;
 float3 cameraPos;
 float3 cameraDir;
 float3 cameraRight;
@@ -143,12 +147,15 @@ float lightAngle1;
 float lightAngle2;
 bool mouseClicked;
 bool shadowsActive;
-
+bool voxelizationViewActive;
+int voxelDim;
+bool animSceneActive;
 
 //  GPU resources
 ID3D11Device1* device;
 ID3D11DeviceContext1* deviceContext;
 IDXGIAdapter* dxgiAdapter;
+IDXGISwapChain1* swapChain;
 
 ID3D11Texture2D* frameBuffer;
 ID3D11RenderTargetView* frameBufferView;
@@ -158,15 +165,23 @@ ID3D11ShaderResourceView* depthBufferSRV;
 ID3D11Texture2D* shadowMapBuffer;
 ID3D11DepthStencilView* shadowMapView;
 ID3D11ShaderResourceView* shadowMapSRV;
-
-ID3DBlob* vsBlob;
-ID3DBlob* psBlob;
+ID3D11Texture3D* voxelTexture;
+ID3D11UnorderedAccessView* voxelUAV;
+ID3D11ShaderResourceView* voxelSRV;
 
 ID3D11VertexShader* vertexShader;
 ID3D11PixelShader* pixelShader;
-
 ID3D11VertexShader* shadowMapVertexShader;
 ID3D11PixelShader* shadowMapPixelShader;
+ID3D11VertexShader* voxelizationVertexShader;
+ID3D11GeometryShader* voxelizationGeometryShader;
+ID3D11PixelShader* voxelizationPixelShader;
+ID3D11VertexShader* voxelizationViewerVertexShader;
+ID3D11GeometryShader* voxelizationViewerGeometryShader;
+ID3D11PixelShader* voxelizationViewerPixelShader;
+ID3D11InputLayout* inputLayout;
+ID3D11InputLayout* voxelLayout;
+
 
 ID3D11Buffer* vertexBuffer;
 ID3D11Buffer* indexBuffer;
@@ -175,12 +190,24 @@ ID3D11Buffer* constantBuffer;
 ID3D11ShaderResourceView* pViewnullptr = nullptr;
 ID3D11UnorderedAccessView* pUnorderedViewnullptr = nullptr;
 
+D3D11_VIEWPORT viewportScene;
+D3D11_VIEWPORT viewportVoxelize;
+
+ID3D11RasterizerState1* sceneRasterizerState;
+ID3D11RasterizerState1* sceneWireframeRasterizerState;
+ID3D11RasterizerState1* voxelizeRasterizerState;
+ID3D11DepthStencilState* sceneDepthStencilState;
+ID3D11DepthStencilState* voxelizeDepthStencilState;
+
+
 struct GlobalShaderConstants
 {
     float4x4 ProjMat;
     float4x4 ViewMat;
     float4x4 LightProjMat;
     float4x4 LightViewMat;
+    int VoxelDim;
+    bool AnimScene;
     float WorldTime;
 };
 struct GPUProfiling
@@ -253,7 +280,7 @@ struct GPUProfiling
                 }
                 else
                 {
-                    gpuQueryTimes[i] = 0.01f * (Delta / Frequency) * 1000.0f + 0.99f * gpuQueryTimes[i];
+                    gpuQueryTimes[i] = 0.1f * (Delta / Frequency) * 1000.0f + 0.9f * gpuQueryTimes[i];
                 }
             }
         }
@@ -279,22 +306,50 @@ struct GPUProfiling
 
         ImGui::Columns(1);
     }
-
-
 };
-void CompileAllShaders()
+
+void CompileAllShadersAndCreateLayout()
 {
+    ID3DBlob* vsBlob; ID3DBlob* psBlob; ID3DBlob* gsBlob;
 
-    D3DCompileFromFile(L"shader.hlsl", nullptr, nullptr, "vs_main", "vs_5_0", 0, 0, &vsBlob, nullptr);
+    D3D11_INPUT_ELEMENT_DESC inputElementDesc[] = // float3 position, float3 normal, float2 texcoord, float3 color
+    {
+        { "POSITION",   0,    DXGI_FORMAT_R32G32B32_FLOAT,    0,                            0,   D3D11_INPUT_PER_VERTEX_DATA,   0 },
+        { "NORMAL",     0,    DXGI_FORMAT_R32G32B32_FLOAT,    0, D3D11_APPEND_ALIGNED_ELEMENT,   D3D11_INPUT_PER_VERTEX_DATA,   0 },
+        { "TEXCOORD",   0,    DXGI_FORMAT_R32G32_FLOAT,       0, D3D11_APPEND_ALIGNED_ELEMENT,   D3D11_INPUT_PER_VERTEX_DATA,   0 }
+    };
+
+    D3DCompileFromFile(L"shader.hlsl", nullptr, ((ID3DInclude*)(UINT_PTR)1), "vs_main", "vs_5_0", 0, 0, &vsBlob, nullptr);
     device->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &vertexShader);
-    D3DCompileFromFile(L"shader.hlsl", nullptr, nullptr, "ps_main", "ps_5_0", 0, 0, &psBlob, nullptr);
+    D3DCompileFromFile(L"shader.hlsl", nullptr, ((ID3DInclude*)(UINT_PTR)1), "ps_main", "ps_5_0", 0, 0, &psBlob, nullptr);
     device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &pixelShader);
-
+    
     //Shadow maps shaders
-    D3DCompileFromFile(L"shader.hlsl", nullptr, nullptr, "vs_main_light", "vs_5_0", 0, 0, &vsBlob, nullptr);
+    D3DCompileFromFile(L"shader.hlsl", nullptr, ((ID3DInclude*)(UINT_PTR)1), "vs_main_light", "vs_5_0", 0, 0, &vsBlob, nullptr);
     device->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &shadowMapVertexShader);
-    D3DCompileFromFile(L"shader.hlsl", nullptr, nullptr, "ps_main_light", "ps_5_0", 0, 0, &psBlob, nullptr);
+    D3DCompileFromFile(L"shader.hlsl", nullptr, ((ID3DInclude*)(UINT_PTR)1), "ps_main_light", "ps_5_0", 0, 0, &psBlob, nullptr);
     device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &shadowMapPixelShader);
+
+    device->CreateInputLayout(inputElementDesc, ARRAYSIZE(inputElementDesc), vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), &inputLayout);
+
+    //Voxelization shaders
+    D3DCompileFromFile(L"voxelize.hlsl", nullptr, ((ID3DInclude*)(UINT_PTR)1), "vs_main", "vs_5_0", 0, 0, &vsBlob, nullptr);
+    device->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &voxelizationVertexShader);
+    D3DCompileFromFile(L"voxelize.hlsl", nullptr, ((ID3DInclude*)(UINT_PTR)1), "ps_main", "ps_5_0", 0, 0, &psBlob, nullptr);
+    device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &voxelizationPixelShader);
+    D3DCompileFromFile(L"voxelize.hlsl", nullptr, ((ID3DInclude*)(UINT_PTR)1), "gs_main", "gs_5_0", 0, 0, &gsBlob, nullptr);
+    device->CreateGeometryShader(gsBlob->GetBufferPointer(), gsBlob->GetBufferSize(), nullptr, &voxelizationGeometryShader);
+
+    device->CreateInputLayout(inputElementDesc, ARRAYSIZE(inputElementDesc), vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), &voxelLayout);
+
+    //Voxelization viewers
+    D3DCompileFromFile(L"voxelizeviewer.hlsl", nullptr, ((ID3DInclude*)(UINT_PTR)1), "vs_main", "vs_5_0", 0, 0, &vsBlob, nullptr);
+    device->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &voxelizationViewerVertexShader);
+    D3DCompileFromFile(L"voxelizeviewer.hlsl", nullptr, ((ID3DInclude*)(UINT_PTR)1), "ps_main", "ps_5_0", 0, 0, &psBlob, nullptr);
+    device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &voxelizationViewerPixelShader);
+    D3DCompileFromFile(L"voxelizeviewer.hlsl", nullptr, ((ID3DInclude*)(UINT_PTR)1), "gs_main", "gs_5_0", 0, 0, &gsBlob, nullptr);
+    device->CreateGeometryShader(gsBlob->GetBufferPointer(), gsBlob->GetBufferSize(), nullptr, &voxelizationViewerGeometryShader);
+
 }
 void CreateAllVertexIndexBuffers()
 {
@@ -321,9 +376,64 @@ void CreateConstantsBuffers()
     constantBufferDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
     device->CreateBuffer(&constantBufferDesc, nullptr, &constantBuffer);
 }
+
+void GenerateVoxelResources()
+{
+    D3D11_TEXTURE3D_DESC voxelTextureDesc;
+    {
+        voxelTextureDesc.Width = voxelDim;
+        voxelTextureDesc.Height = voxelDim;
+        voxelTextureDesc.Depth = voxelDim;
+        voxelTextureDesc.MipLevels = 0;
+        voxelTextureDesc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+        voxelTextureDesc.Usage = D3D11_USAGE_DEFAULT;
+        voxelTextureDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_RENDER_TARGET;
+        voxelTextureDesc.CPUAccessFlags = 0;
+        voxelTextureDesc.MiscFlags = D3D11_RESOURCE_MISC_GENERATE_MIPS;
+    }
+    device->CreateTexture3D(&voxelTextureDesc, NULL, &voxelTexture);
+
+    D3D11_UNORDERED_ACCESS_VIEW_DESC  voxelUAVDesc;
+    {
+        voxelUAVDesc.Format = voxelTextureDesc.Format;
+        voxelUAVDesc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE3D;
+        voxelUAVDesc.Texture3D.FirstWSlice = 0;
+        voxelUAVDesc.Texture3D.MipSlice = 0;
+        voxelUAVDesc.Texture3D.WSize = voxelDim;
+        device->CreateUnorderedAccessView(voxelTexture, &voxelUAVDesc, &voxelUAV);
+    }
+
+    D3D11_SHADER_RESOURCE_VIEW_DESC voxelSRVDesc;
+    {
+        voxelSRVDesc.Format = voxelTextureDesc.Format;
+        voxelSRVDesc.Texture3D.MipLevels = -1;
+        voxelSRVDesc.Texture3D.MostDetailedMip = 0;
+        voxelSRVDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE3D;
+        device->CreateShaderResourceView(voxelTexture, &voxelSRVDesc, &voxelSRV);
+    }
+
+    deviceContext->GenerateMips(voxelSRV);
+    viewportVoxelize = { 0.0f, 0.0f, (float)voxelDim, (float)voxelDim, 0.0f, 1.0f };
+
+}
     
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nShowCmd)
 {
+    worldTime = 0.0f;
+    cameraPos = { 17.0f,20.0f, 17.0f };
+    cameraDir = { -0.5f, -0.5f, -0.5f };
+    cameraRight = { 0.0f,0.0f,0.0f };
+    cameraUp = { 0.0f,0.0f,0.0f };
+    lightDir = { -0.5f, -0.5f, -0.5f };
+    lightColor = { 1.0f, 1.0f, 1.0f };
+    lightAngle1 = 0.2f;
+    lightAngle2 = 0.6f;
+    mouseClicked = false;
+    shadowsActive = true;
+    voxelizationViewActive = false;
+    animSceneActive = false;
+    voxelDim = 128;
+
     WNDCLASSA wndClass = { 0, DefWindowProcA, 0, 0, 0, 0, 0, 0, 0, TITLE };
     RegisterClassA(&wndClass);
     HWND window = CreateWindowExA(0, TITLE, TITLE, WS_POPUP | WS_MAXIMIZE | WS_VISIBLE, 0, 0, 0, 0, nullptr, nullptr, nullptr, nullptr);
@@ -356,14 +466,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         swapChainDesc.AlphaMode = DXGI_ALPHA_MODE_UNSPECIFIED;
         swapChainDesc.Flags = 0;
     }
-    IDXGISwapChain1* swapChain;
     dxgiFactory->CreateSwapChainForHwnd(device, window, &swapChainDesc, nullptr, nullptr, &swapChain);
 
     swapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&frameBuffer);
     device->CreateRenderTargetView(frameBuffer, nullptr, &frameBufferView);
 
     D3D11_TEXTURE2D_DESC depthBufferDesc;
-    frameBuffer->GetDesc(&depthBufferDesc);{
+    frameBuffer->GetDesc(&depthBufferDesc);
+    {
         depthBufferDesc.MipLevels = 1;
         depthBufferDesc.ArraySize = 1;
         depthBufferDesc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
@@ -403,7 +513,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     D3D11_DEPTH_STENCIL_VIEW_DESC shadowmapDSVdesc = {};
     shadowmapDSVdesc.Format = DXGI_FORMAT_D32_FLOAT;
     shadowmapDSVdesc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
-    device->CreateDepthStencilView(shadowMapBuffer, &shadowmapDSVdesc,  &shadowMapView);
+    device->CreateDepthStencilView(shadowMapBuffer, &shadowmapDSVdesc, &shadowMapView);
 
     D3D11_SHADER_RESOURCE_VIEW_DESC shadowmapSRVdesc = {};
     shadowmapSRVdesc.Format = DXGI_FORMAT_R32_FLOAT;
@@ -411,63 +521,64 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     shadowmapSRVdesc.Texture2D.MipLevels = 1;
     device->CreateShaderResourceView(shadowMapBuffer, &shadowmapSRVdesc, &shadowMapSRV);
 
-    CompileAllShaders();
 
-    ID3D11InputLayout* inputLayout;
-    D3D11_INPUT_ELEMENT_DESC inputElementDesc[] = // float3 position, float3 normal, float2 texcoord, float3 color
-    {
-        { "POSITION", 0,           DXGI_FORMAT_R32G32B32_FLOAT,    0,                            0,   D3D11_INPUT_PER_VERTEX_DATA,   0 },
-        { "NORMAL", 0,           DXGI_FORMAT_R32G32B32_FLOAT,    0, D3D11_APPEND_ALIGNED_ELEMENT,   D3D11_INPUT_PER_VERTEX_DATA,   0 },
-        { "TEXCOORD", 0,           DXGI_FORMAT_R32G32_FLOAT,       0, D3D11_APPEND_ALIGNED_ELEMENT,   D3D11_INPUT_PER_VERTEX_DATA,   0 },
-        { "SV_InstanceID", 0, DXGI_FORMAT_R32_UINT,           0, D3D11_APPEND_ALIGNED_ELEMENT,   D3D11_INPUT_PER_VERTEX_DATA,   0 },
-    };
-    device->CreateInputLayout(inputElementDesc, ARRAYSIZE(inputElementDesc), vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), &inputLayout);
+    GenerateVoxelResources();
 
-    D3D11_RASTERIZER_DESC1 rasterizerDesc = {};
+    ID3D11Buffer* voxelCounterBuffer;
+    D3D11_BUFFER_DESC voxelCounterBufferDesc = {};
     {
-        rasterizerDesc.FillMode = D3D11_FILL_SOLID;
-        rasterizerDesc.CullMode = D3D11_CULL_BACK;
+        voxelCounterBufferDesc.Usage = D3D11_USAGE_DEFAULT;
+        voxelCounterBufferDesc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+        voxelCounterBufferDesc.ByteWidth = sizeof(UINT);
     }
-    ID3D11RasterizerState1* rasterizerState;
-    device->CreateRasterizerState1(&rasterizerDesc, &rasterizerState);
 
-    D3D11_SAMPLER_DESC samplerDesc = {};
+    device->CreateBuffer(&voxelCounterBufferDesc, nullptr, &voxelCounterBuffer);
+
+    ID3D11UnorderedAccessView* voxelCounterBufferUAV;
+    D3D11_UNORDERED_ACCESS_VIEW_DESC voxelCounterBufferUAVDesc = {};
     {
-        samplerDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
-        samplerDesc.AddressU = D3D11_TEXTURE_ADDRESS_WRAP;
-        samplerDesc.AddressV = D3D11_TEXTURE_ADDRESS_WRAP;
-        samplerDesc.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
-        samplerDesc.ComparisonFunc = D3D11_COMPARISON_NEVER;
+        voxelCounterBufferUAVDesc.Format = DXGI_FORMAT_R32_UINT;
+        voxelCounterBufferUAVDesc.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+        voxelCounterBufferUAVDesc.Buffer.FirstElement = 0;
+        voxelCounterBufferUAVDesc.Buffer.NumElements = 1;
     }
-    ID3D11SamplerState* samplerState;
-    device->CreateSamplerState(&samplerDesc, &samplerState);
+    device->CreateUnorderedAccessView(voxelCounterBuffer, &voxelCounterBufferUAVDesc, &voxelCounterBufferUAV);
 
-    D3D11_BLEND_DESC blendDesc = {};
+    CompileAllShadersAndCreateLayout();
+
+    D3D11_RASTERIZER_DESC1 sceneRasterizerDesc = {};
     {
-            blendDesc.RenderTarget[0].BlendEnable = FALSE;
-            blendDesc.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC_ALPHA;
-            blendDesc.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
-            blendDesc.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
-            blendDesc.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
-            blendDesc.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ZERO;
-            blendDesc.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
-            blendDesc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
-        }
-    ID3D11BlendState* blendState;
-    device->CreateBlendState(&blendDesc, &blendState);
+        sceneRasterizerDesc.FillMode = D3D11_FILL_SOLID;
+        sceneRasterizerDesc.CullMode = D3D11_CULL_BACK;
+    }
+    device->CreateRasterizerState1(&sceneRasterizerDesc, &sceneRasterizerState);
+    D3D11_RASTERIZER_DESC1 voxelizeRasterizerDesc = {};
+    {
+        voxelizeRasterizerDesc.FillMode = D3D11_FILL_SOLID;
+        voxelizeRasterizerDesc.CullMode = D3D11_CULL_NONE;
+    }
+    device->CreateRasterizerState1(&voxelizeRasterizerDesc, &voxelizeRasterizerState);
+    D3D11_DEPTH_STENCIL_DESC voxelizeDepthStencilDesc = {};
+    {
+        voxelizeDepthStencilDesc.DepthEnable = false;
+        voxelizeDepthStencilDesc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+    }
+    device->CreateDepthStencilState(&voxelizeDepthStencilDesc, &voxelizeDepthStencilState);
+    D3D11_RASTERIZER_DESC1 sceneWireframeRasterizerDesc = {};
+    {
+        sceneWireframeRasterizerDesc.FillMode = D3D11_FILL_WIREFRAME;
+        sceneWireframeRasterizerDesc.CullMode = D3D11_CULL_NONE;
+    }
+    device->CreateRasterizerState1(&sceneWireframeRasterizerDesc, &sceneWireframeRasterizerState);
    
     CreateConstantsBuffers();
     CreateAllVertexIndexBuffers();
 
-    float backgroundColor[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+    float backgroundColor[4] = { 0.1f, 0.05f, 0.02f, 1.0f };
     UINT stride = 8 * sizeof(float); // vertex size (11 floats: float3 position, float3 normal, float2 texcoord, float3 color)
     UINT offset = 0;
-    D3D11_VIEWPORT viewport = { 0.0f, 0.0f, (float)(depthBufferDesc.Width), (float)(depthBufferDesc.Height), 0.0f, 1.0f };  
-    viewport.MinDepth = 0.0f;
-    viewport.MaxDepth = 1.0f;
 
-    //Global time
-    float worldTime = 0.0f;
+    viewportScene = { 0.0f, 0.0f, (float)(depthBufferDesc.Width), (float)(depthBufferDesc.Height), 0.0f, 1.0f };  
 
     D3D11_MAPPED_SUBRESOURCE mappedSubresource;
     deviceContext->Map(constantBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mappedSubresource);
@@ -483,18 +594,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     ImGui_ImplDX11_Init(device, deviceContext);
     ImGui_ImplWin32_Init(window);
-    
-    cameraPos = { 17.0f,20.0f, 17.0f };
-    cameraDir = { -0.5f, -0.5f, -0.5f };
-    cameraRight = { 0.0f,0.0f,0.0f };
-    cameraUp = { 0.0f,0.0f,0.0f };
-    lightDir = { -0.5f, -0.5f, -0.5f };
-    lightColor = { 1.0f, 1.0f, 1.0f };
-    lightAngle1 = 0.2f;
-    lightAngle2 = 0.6f;
-    mouseClicked = false;
-    shadowsActive = true;
-
+   
     //Time querys
     GPUProfiling gpuProfiling;
 
@@ -555,7 +655,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                     ImGui::DragFloat("Near", &cameraortho_near, 0.01f);
                     ImGui::DragFloat("Far", &cameraortho_far, 0.01f);
 
-                    constants->ProjMat = computeOrthographicMatrix(cameraortho_width * viewport.Width / viewport.Height, cameraortho_height, cameraortho_near, cameraortho_far);
+                    constants->ProjMat = computeOrthographicMatrix(cameraortho_width * viewportScene.Width / viewportScene.Height, cameraortho_height, cameraortho_near, cameraortho_far);
                 }
                 if (cameraSelectedType == 1)
                 {
@@ -563,7 +663,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                     ImGui::DragFloat("Near", &camerapers_near, 0.01f);
                     ImGui::DragFloat("Far", &camerapers_far, 0.01f);
 
-                    constants->ProjMat = computeProjectionMatrix(camerapers_fov, viewport.Width / viewport.Height, camerapers_near, camerapers_far);
+                    constants->ProjMat = computeProjectionMatrix(camerapers_fov, viewportScene.Width / viewportScene.Height, camerapers_near, camerapers_far);
                 }
 
             }
@@ -579,10 +679,22 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                 ImGui::DragFloat("Azimuthal angle", &lightAngle1, 0.01f);
                 ImGui::DragFloat("Zenithal angle", &lightAngle2, 0.01f);
                 ImGui::Checkbox("Shadows enabled", &shadowsActive);
-
             }
 
-            ImGui::NewLine();
+            if (ImGui::CollapsingHeader("Voxelization", ImGuiTreeNodeFlags_DefaultOpen))
+            {
+                if (ImGui::SliderInt("Voxel dimension", &voxelDim, 4, 128))
+                {
+                    GenerateVoxelResources();
+                }
+                ImGui::Checkbox("Voxelization view enabled", &voxelizationViewActive);           
+                //ImGui::Text("Number voxels filled %d", numbervoxels);
+            }
+
+            if (ImGui::CollapsingHeader("Scene", ImGuiTreeNodeFlags_DefaultOpen))
+            {
+                ImGui::Checkbox("Animated scene", &animSceneActive);
+            }
 
             if (ImGui::CollapsingHeader("GPU Profiling", ImGuiTreeNodeFlags_DefaultOpen))
             {
@@ -605,7 +717,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         constants->WorldTime = worldTime;
         constants->ViewMat = computeViewMatrix(cameraPos, cameraPos + cameraDir);
         constants->LightViewMat = computeViewMatrix(-20.0f * lightDir, float3{ 0.0f,0.0f,0.0f });
-        constants->LightProjMat = computeOrthographicMatrix(15.0f * viewport.Width / viewport.Height, 15.0f, 1.0f, 25.0f);
+        constants->LightProjMat = computeOrthographicMatrix(15.0f * viewportScene.Width / viewportScene.Height, 15.0f, 1.0f, 25.0f);
+        constants->VoxelDim = voxelDim;
+        constants->AnimScene = animSceneActive;
 
         cameraRight = getRightVectorViewMatrix(constants->ViewMat);
         cameraUp = getUpVectorViewMatrix(constants->ViewMat);
@@ -618,9 +732,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             }
 
             if (msg.message == WM_KEYDOWN && msg.wParam == VK_ESCAPE) return 0;
+            if (msg.message == WM_KEYDOWN && msg.wParam == 'Q')
+            {
+            }
             if (msg.message == WM_KEYDOWN && msg.wParam == 'R')
             {
-                CompileAllShaders();
+                CompileAllShadersAndCreateLayout();
             }
 
             //Basic logic for camera movement
@@ -687,10 +804,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
         gpuProfiling.beginProfiling();
 
+
         gpuProfiling.addPoint("Clear render targets");
         deviceContext->ClearDepthStencilView(shadowMapView, D3D11_CLEAR_DEPTH, 1.0f, 0);
-        deviceContext->ClearRenderTargetView(frameBufferView, backgroundColor);
         deviceContext->ClearDepthStencilView(depthBufferView, D3D11_CLEAR_DEPTH, 1.0f, 0);
+        deviceContext->ClearRenderTargetView(frameBufferView, backgroundColor);
+
+        deviceContext->VSSetConstantBuffers(0, 1, &constantBuffer);
+        deviceContext->GSSetConstantBuffers(0, 1, &constantBuffer);
+        deviceContext->PSSetConstantBuffers(0, 1, &constantBuffer);
 
         gpuProfiling.addPoint("Shadow map render");
         deviceContext->OMSetRenderTargets(0, nullptr, shadowMapView);
@@ -702,12 +824,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
         deviceContext->VSSetShaderResources(0, 1, &pViewnullptr);
         deviceContext->VSSetShader(shadowMapVertexShader, nullptr, 0);
-        deviceContext->VSSetConstantBuffers(0, 1, &constantBuffer);
-
+        deviceContext->GSSetShader(nullptr, nullptr, 0);
         deviceContext->PSSetShader(shadowMapPixelShader, nullptr, 0);
 
-        deviceContext->RSSetViewports(1, &viewport);
-        deviceContext->RSSetState(rasterizerState);
+        deviceContext->RSSetViewports(1, &viewportScene);
+        deviceContext->RSSetState(sceneRasterizerState);
 
         if (shadowsActive)
         {
@@ -715,19 +836,72 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         }
 
         gpuProfiling.addPoint("Normal render");
-
+        deviceContext->OMSetRenderTargets(0, nullptr, nullptr);
         deviceContext->OMSetRenderTargets(1, &frameBufferView, depthBufferView);
-        deviceContext->VSSetShaderResources(0, 1, &pViewnullptr);
-        deviceContext->VSSetShader(vertexShader, nullptr, 0);
-        deviceContext->VSSetConstantBuffers(0, 1, &constantBuffer);
 
-        deviceContext->PSSetShaderResources(0, 1, &pViewnullptr);
+        deviceContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        deviceContext->IASetInputLayout(inputLayout);
+        deviceContext->IASetVertexBuffers(0, 1, &vertexBuffer, &stride, &offset);
+        deviceContext->IASetIndexBuffer(indexBuffer, DXGI_FORMAT_R32_UINT, 0);
+
+        deviceContext->VSSetShader(vertexShader, nullptr, 0);
+        deviceContext->GSSetShader(nullptr, nullptr, 0);
         deviceContext->PSSetShaderResources(0, 1, &shadowMapSRV);
         deviceContext->PSSetShader(pixelShader, nullptr, 0);
-        deviceContext->PSSetSamplers(0, 1, &samplerState);
-        deviceContext->PSSetConstantBuffers(0, 1, &constantBuffer);
+
+        deviceContext->RSSetViewports(1, &viewportScene);
+        deviceContext->RSSetState(sceneRasterizerState);
 
         deviceContext->DrawIndexed(ARRAYSIZE(IndexData), 0, 0);
+
+        gpuProfiling.addPoint("Voxelization");
+
+        const float ZEROCOLOR[4] = { 0.0f,0.0f,0.0f,-1.0f };
+        deviceContext->ClearUnorderedAccessViewFloat(voxelUAV, ZEROCOLOR);
+        const void* pUAVs[] = { voxelUAV };
+        deviceContext->OMSetRenderTargetsAndUnorderedAccessViews(0, nullptr, nullptr, 1, 1, (ID3D11UnorderedAccessView**)pUAVs, nullptr);
+
+        deviceContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        deviceContext->IASetInputLayout(voxelLayout);
+        deviceContext->IASetVertexBuffers(0, 1, &vertexBuffer, &stride, &offset);
+        deviceContext->IASetIndexBuffer(indexBuffer, DXGI_FORMAT_R32_UINT, 0);
+
+        deviceContext->VSSetShader(voxelizationVertexShader, nullptr, 0);
+        deviceContext->GSSetShader(voxelizationGeometryShader, nullptr, 0);
+        deviceContext->PSSetShader(voxelizationPixelShader, nullptr, 0);
+
+        deviceContext->RSSetViewports(1, &viewportVoxelize);
+        deviceContext->RSSetState(voxelizeRasterizerState);
+
+        deviceContext->DrawIndexed(ARRAYSIZE(IndexData), 0, 0);
+
+        deviceContext->OMSetRenderTargetsAndUnorderedAccessViews(0, nullptr, nullptr, 0, 0, nullptr, nullptr);
+        deviceContext->GenerateMips(voxelSRV);
+
+        if (voxelizationViewActive)
+        {
+            gpuProfiling.addPoint("Voxelization viewers");
+
+            deviceContext->ClearDepthStencilView(depthBufferView, D3D11_CLEAR_DEPTH, 1.0f, 0);
+            deviceContext->ClearRenderTargetView(frameBufferView, backgroundColor);
+            const float ZEROCOLOR[4] = { 0.0f,0.0f,0.0f,-1.0f };
+            deviceContext->OMSetRenderTargets(1, &frameBufferView, depthBufferView);
+
+            deviceContext->VSSetShaderResources(1, 1, &voxelSRV);
+            deviceContext->VSSetShader(voxelizationViewerVertexShader, nullptr, 0);
+            deviceContext->GSSetShader(voxelizationViewerGeometryShader, nullptr, 0);
+            deviceContext->PSSetShader(voxelizationViewerPixelShader, nullptr, 0);
+
+            deviceContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_POINTLIST);
+            deviceContext->IASetInputLayout(nullptr);
+
+            deviceContext->RSSetViewports(1, &viewportScene);
+            deviceContext->RSSetState(sceneRasterizerState);
+
+            deviceContext->Draw(voxelDim * voxelDim * voxelDim, 0);
+        }
+
+        deviceContext->OMSetRenderTargets(1, &frameBufferView, depthBufferView);
 
         gpuProfiling.endProfiling();
 
