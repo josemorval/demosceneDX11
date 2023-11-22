@@ -226,7 +226,6 @@ struct GPUProfiling
         queryDesc.MiscFlags = 0;
         queryDesc.Query = D3D11_QUERY_TIMESTAMP_DISJOINT;
         device->CreateQuery(&queryDesc, &gpuQueryDisjoint);
-
         queryDesc.MiscFlags = 0;
         queryDesc.Query = D3D11_QUERY_TIMESTAMP;
         for (int i = 0; i < 20; i++)
