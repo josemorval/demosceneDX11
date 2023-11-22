@@ -13,6 +13,10 @@ First steps in developing a 64k demo.
 - **Render target visualization for profiling, currently showing lightview** 
 - **Voxelization of the scene**
 
+## Controls
+
+Simple camera control: middle mouse button + WASD to forward-lateral movement + mouse cursor for changing forward vector.  
+
 ## Future Goals
 
 - **Voxel Cone Tracing Global Illumination:** Implementation of Voxel Cone Tracing technique for enhanced global illumination.
